@@ -1,10 +1,18 @@
+import random
 import socket
 import threading
 import os
 
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from crypto_utils import hash_file_bytes
+
 
 class FileSharePeer:
     def __init__(self, sock):
+        self.AES_key = None
         self.peer_socket = sock
         self.shared_files = {}
         threading.Thread(target=self.start_peer).start()
@@ -29,9 +37,12 @@ class FileSharePeer:
                 if command == "DOWNLOAD":
                     filename = msg[1]
                     print(f"Received filename for download: {filename}")
-                    self.download_file(client_socket, filename)
+                    self.download_file(client_socket, filename, self.AES_key)
                 elif command == "SEARCH":
                     self.search_files(client_socket)
+                elif command == "KEYEXCHANGE":
+                    self.AES_key = self.dh_key_exchange_peer(client_socket)
+                    print(f"Received AES key for file transfer: {self.AES_key}")
                 elif command == "QUIT":
                     break
                 else:
@@ -43,25 +54,73 @@ class FileSharePeer:
             print(f"Closing connection with {client_address}")
             client_socket.close()
 
-    def download_file(self, client_socket, filename):
+    def download_file(self, client_socket, filename, aes_key):
         print(f"Attempting to download file: {filename}")
 
-        saved_path = self.shared_files[filename] if filename in self.shared_files else None
+        saved_path = self.shared_files.get(filename)
         if saved_path is None:
             print(f"File {filename} not found in shared files.")
             client_socket.send(b'ERROR')
-        else:
-            client_socket.send(b'OK')
-            try:
-                with open(saved_path, 'rb') as file:
-                    while chunk := file.read(1024):
-                        client_socket.send(chunk)
-                client_socket.shutdown(socket.SHUT_WR)
-                print(f"File {filename} sent successfully.")
-            except Exception as e:
-                print(f"Error sending file {filename}: {e}")
-                client_socket.send(b'ERROR')
+            return
+
+        client_socket.send(b'OK')
+        iv = os.urandom(16)
+        print(f"Generated IV: {iv}")
+        client_socket.send(iv)
+
+        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        padder = padding.PKCS7(128).padder()
+        encrypted_data = bytearray()
+
+        try:
+            with open(saved_path, 'rb') as file:
+                while chunk := file.read(1024):
+                    padded = padder.update(chunk)
+                    encrypted_chunk = encryptor.update(padded)
+                    encrypted_data.extend(encrypted_chunk)
+
+            final_block = padder.finalize()
+            final_encrypted = encryptor.update(final_block) + encryptor.finalize()
+            encrypted_data.extend(final_encrypted)
+
+            # Compute hash BEFORE sending the file
+            file_hash = hash_file_bytes(encrypted_data)
+            print(f"Encrypted file hash (SHA-256): {file_hash}")
+
+            # Send encrypted file
+            client_socket.sendall(encrypted_data)
+
+            # Delimiter before sending hash
+            client_socket.sendall(b"HASH_START" + file_hash.encode())
+
+            client_socket.shutdown(socket.SHUT_WR)
+            print(f"File {filename} sent successfully.")
+        except Exception as e:
+            print(f"Error sending file {filename}: {e}")
+            client_socket.send(b'ERROR')
 
     def search_files(self, client_socket):
         file_list = '\n'.join(self.shared_files.keys())
-        client_socket.send(file_list.encode())
+        if file_list == "":
+            client_socket.send(b'EMPTYLIST')
+        else:
+            client_socket.send(file_list.encode())
+
+    def dh_key_exchange_peer(self, client_socket):
+        client_data = client_socket.recv(1024).decode()
+        p, g, client_public_key = map(int, client_data.split(','))
+
+        # Generate the client's private key
+        private_key = random.randint(1, p - 1)
+
+        # Calculate the client's public key: B = g^b % p
+        public_key = pow(g, private_key, p)
+
+        client_socket.send(str(public_key).encode())
+
+        shared_key = pow(client_public_key, private_key, p)
+
+        aes_key = shared_key.to_bytes(16, byteorder='big')
+
+        return aes_key

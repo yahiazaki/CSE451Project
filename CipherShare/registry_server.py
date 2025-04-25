@@ -4,7 +4,10 @@ import threading
 import json
 import base64
 import uuid
-from crypto_utils import verify_password
+
+from cryptography.hazmat.primitives import serialization
+
+from crypto_utils import verify_password, generate_rsa_key_pair, encrypt_private_key
 
 
 class AuthenticationServer:
@@ -55,7 +58,7 @@ class AuthenticationServer:
                     else:
                         users[username] = {
                             "hashed_password": hashed_password,
-                            "derived_key": derived_key
+                            "derived_key": derived_key,
                         }
                         save_users(users)
                         print("Updated users:", users)
@@ -68,6 +71,9 @@ class AuthenticationServer:
                     users = load_users()
 
                     if username in users:
+                        if username in self.activeUsers:
+                            client_socket.sendall(b"ERROR: User already logged in")
+                            continue
                         hashed = users[username]['hashed_password']
                         if verify_password(password, hashed):
                             session_id = str(uuid.uuid4())
@@ -94,12 +100,17 @@ class AuthenticationServer:
                     client_socket.sendall(json.dumps(self.activeUsers).encode())
                 elif command == "QUIT":
                     break
+                elif command == "SESSION_EXPIRED":
+                    session_id = str(uuid.uuid4())
+                    client_socket.sendall(session_id.encode())
 
             except Exception as e:
                 print(f"Error handling client {client_address}: {e}")
                 break
 
         client_socket.close()
+        if activeUsername in self.activeUsers:
+            del self.activeUsers[activeUsername]
 
 
 if __name__ == '__main__':
