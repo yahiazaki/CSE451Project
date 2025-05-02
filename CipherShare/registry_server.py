@@ -7,7 +7,7 @@ import uuid
 
 from cryptography.hazmat.primitives import serialization
 
-from crypto_utils import verify_password, generate_rsa_key_pair, encrypt_private_key
+from crypto_utils import verify_password
 
 
 class AuthenticationServer:
@@ -77,7 +77,7 @@ class AuthenticationServer:
                         hashed = users[username]['hashed_password']
                         if verify_password(password, hashed):
                             session_id = str(uuid.uuid4())
-                            client_socket.sendall(f"SESSION:{session_id}".encode())
+                            client_socket.sendall(f"SESSION:{session_id}:{hashed}".encode())
                             address, port = client_socket.recv(1024).decode().split()
                             self.activeUsers[username] = {
                                 "address": client_address[0],

@@ -15,6 +15,7 @@ from fileshare_peer import FileSharePeer
 
 class FileShareClient:
     def __init__(self, host="localhost", port=1234):
+        self.derived_key = None
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.peer_client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_address = (host, port)
@@ -66,10 +67,12 @@ class FileShareClient:
             response = self.client_socket.recv(1024).decode()
             print(response)
             if response.startswith("SESSION:"):
+                parts = response.split(":")
                 self.username = username
+                self.derived_key = parts[2]  # get hashed password
                 self.session_key = {
                     "username": username,
-                    "key": response.split(":")[1],
+                    "key":  parts[1],
                     "expires_at": time.time() + 60,  # expires in 1 hour
                 }
                 peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

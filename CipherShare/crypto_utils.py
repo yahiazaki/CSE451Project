@@ -1,7 +1,9 @@
 import base64
+import hashlib
 import secrets
 
 from argon2 import PasswordHasher
+from cryptography.fernet import Fernet
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import algorithms, Cipher, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -51,44 +53,24 @@ def derive_key_from_password(password, salt):
     return key
 
 
-def generate_rsa_key_pair():
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-        backend=default_backend()
-    )
-    public_key = private_key.public_key()
-    return private_key, public_key
-
-
-def encrypt_private_key(private_key_pem: bytes, derived_key: bytes) -> str:
-    iv = os.urandom(16)
-    padder = padding.PKCS7(128).padder()
-    padded_data = padder.update(private_key_pem) + padder.finalize()
-
-    cipher = Cipher(algorithms.AES(derived_key), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
-
-    return base64.b64encode(iv + ciphertext).decode()  # Store as string
-
-
-def encrypt_file_content(data, key):
-    iv = secrets.token_bytes(16)
-    cipher = Cipher(algorithms.AES(key), modes.CFB(iv))
-    encryptor = cipher.encryptor()
-    encrypted_data = encryptor.update(data) + encryptor.finalize()
-    return iv + encrypted_data
-
-
-def decrypt_file_content(encrypted_data, key):
-    iv = encrypted_data[:16]
-    cipher = Cipher(algorithms.AES(key), modes.CFB(iv))
-    decryptor = cipher.decryptor()
-    return decryptor.update(encrypted_data[16:]) + decryptor.finalize()
-
-
 def hash_file_bytes(data):
     digest = hashes.Hash(hashes.SHA256())
     digest.update(data)
     return digest.finalize().hex()
+
+
+def key_from_hash(hashed_password):
+    # Generate a valid Fernet key from hashed password
+    sha256 = hashlib.sha256(hashed_password.encode()).digest()
+    fernet_key = base64.urlsafe_b64encode(sha256)
+    return fernet_key
+
+
+def save_credentials(username, password, derived_key):
+    fernet_key = key_from_hash(derived_key)
+    fernet = Fernet(fernet_key)
+    credentials = f"{username}:{password}"
+    encrypted = fernet.encrypt(credentials.encode())
+
+    with open("credentials.enc", "wb") as f:
+        f.write(encrypted)
