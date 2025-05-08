@@ -1,3 +1,4 @@
+import json
 import random
 import socket
 import threading
@@ -15,6 +16,9 @@ class FileSharePeer:
         self.AES_key = None
         self.peer_socket = sock
         self.shared_files = {}
+        self.local_files = {}
+        self.file_broadcast_port = 60001  # same as client
+        threading.Thread(target=self.listen_for_file_broadcasts, daemon=True).start()
         threading.Thread(target=self.start_peer).start()
 
     def start_peer(self):
@@ -25,6 +29,29 @@ class FileSharePeer:
             client_socket, client_address = self.peer_socket.accept()
             client_thread = threading.Thread(target=self.handle_client_connection, args=(client_socket, client_address))
             client_thread.start()
+
+    def listen_for_file_broadcasts(self):
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.bind(('', self.file_broadcast_port))
+        print(f"[UDP File Listener] Listening on port {self.file_broadcast_port} for file announcements...")
+
+        while True:
+            try:
+                data, addr = udp_socket.recvfrom(4096)
+                file_info = json.loads(data.decode())
+                if file_info.get("type") == "UPLOAD":
+                    filename = file_info["filename"]
+                    uploader = file_info["username"]
+                    self.shared_files[filename] = {
+                        "uploader": uploader,
+                        "address": file_info["address"],
+                        "port": file_info["port"]
+                    }
+                    print(f"[UDP File Received] {filename} shared by {uploader}")
+            except Exception as e:
+                print(f"[UDP File Listener] Error: {e}")
 
     def handle_client_connection(self, client_socket, client_address):
         print(f"Accepted connection from {client_address}")
@@ -40,6 +67,17 @@ class FileSharePeer:
                     self.download_file(client_socket, filename, self.AES_key)
                 elif command == "SEARCH":
                     self.search_files(client_socket)
+                elif command == "LIST_FILES":
+                    if not self.shared_files:
+                        client_socket.send(b'{}')  # Send empty JSON dict
+                    else:
+                        # Send only filename and uploader
+                        filtered = {
+                            fname: info["uploader"]
+                            for fname, info in self.shared_files.items() if info["uploader"] != msg[1]
+                        }
+                        client_socket.send(json.dumps(filtered).encode())
+
                 elif command == "KEYEXCHANGE":
                     self.AES_key = self.dh_key_exchange_peer(client_socket)
                     print(f"Received AES key for file transfer: {self.AES_key}")
@@ -57,7 +95,7 @@ class FileSharePeer:
     def download_file(self, client_socket, filename, aes_key):
         print(f"Attempting to download file: {filename}")
 
-        saved_path = self.shared_files.get(filename)
+        saved_path = self.local_files.get(filename)
         if saved_path is None:
             print(f"File {filename} not found in shared files.")
             client_socket.send(b'ERROR')
@@ -101,7 +139,7 @@ class FileSharePeer:
             client_socket.send(b'ERROR')
 
     def search_files(self, client_socket):
-        file_list = '\n'.join(self.shared_files.keys())
+        file_list = '\n'.join(self.local_files.keys())
         if file_list == "":
             client_socket.send(b'EMPTYLIST')
         else:

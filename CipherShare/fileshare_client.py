@@ -3,6 +3,7 @@ import json
 import os
 import random
 import socket
+import threading
 import time
 
 from cryptography.hazmat.backends import default_backend
@@ -15,6 +16,7 @@ from fileshare_peer import FileSharePeer
 
 class FileShareClient:
     def __init__(self, host="localhost", port=1234):
+        self.file_info = None
         self.derived_key = None
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.peer_client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -26,6 +28,10 @@ class FileShareClient:
         self.port = None
         self.userFiles = {}
         self.active_session = {}
+        self.udp_listen_port = 50000  # Must match server broadcast port
+        self.received_user_broadcast = {}
+        self.file_broadcast_port = 60001  # you can change if needed
+        threading.Thread(target=self.listen_for_broadcasts, daemon=True).start()
 
     def connect_to_authentication(self):
         try:
@@ -46,6 +52,35 @@ class FileShareClient:
         except Exception as e:
             print(f"Error connecting to peer {host}:{port} {e}")
             return False
+
+    def listen_for_broadcasts(self):
+        udp_listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_listener.bind(("", self.udp_listen_port))
+
+        while True:
+            try:
+                data, addr = udp_listener.recvfrom(4096)
+                users = json.loads(data.decode())
+                self.received_user_broadcast = users
+                print(f"[Broadcast] Active Users from {addr}: {users}")
+            except Exception as e:
+                print(f"UDP Receive error: {e}")
+
+    def broadcast_file_info(self, filename):
+        self.file_info = {
+            "type": "UPLOAD",
+            "filename": filename,
+            "username": self.username,
+            "address": self.address,
+            "port": self.port
+        }
+        message = json.dumps(self.file_info).encode()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(message, ('<broadcast>', self.file_broadcast_port))
+            print(f"[UDP File Broadcast] Sent file info for {filename}")
 
     def register_user(self, username, password):
         try:
@@ -110,11 +145,9 @@ class FileShareClient:
                 # Extract the filename from the filepath
                 filename = os.path.basename(filepath)
                 print(f"Uploading {filename}...")
+                self.peer_server.local_files[filename] = filepath
+                self.broadcast_file_info(filename)
 
-                # Send the command and filename together in one message, separated by a space
-                message = f"UPLOAD {filename}"
-                self.client_socket.send(message.encode())
-                self.peer_server.shared_files[filename] = filepath
                 return "SUCCESS"
             else:
                 print("Session invalid")
@@ -195,15 +228,40 @@ class FileShareClient:
             return []
 
     def get_available_files(self):
-        try:
-            self.client_socket.sendall(b"AVAILABLE_FILES")
-            self.userFiles = json.loads(self.client_socket.recv(2048).decode())
-            self.userFiles = {
-                k: v for k, v in self.userFiles.items() if v != self.username
-            }
-            return self.userFiles
-        except Exception as e:
-            print(f"Error in file sending {e}")
+        all_files = {}
+
+        # Get all online peers except self
+        peers = self.get_user_addresses()
+        my_username = self.username
+
+        for username, addr in peers.items():
+            if username == my_username:
+                continue  # Skip own files
+
+            try:
+                # Temporarily connect to the peer
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.connect((addr['address'], int(addr['port'])))
+
+                # Send request to list files
+                sock.sendall(f"LIST_FILES {self.username}".encode())
+
+                # Receive response
+                data = sock.recv(4096).decode()
+                if data:
+                    try:
+                        peer_files = json.loads(data)
+                        for filename, uploader in peer_files.items():
+                            all_files[filename] = uploader
+                    except json.JSONDecodeError as e:
+                        print(f"Failed to parse file list from {username}: {e}")
+
+                sock.close()
+            except Exception as e:
+                print(f"Failed to connect to peer {username}: {e}")
+                continue
+
+        return all_files
 
     def get_user_addresses(self):
         try:

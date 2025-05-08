@@ -18,6 +18,10 @@ class AuthenticationServer:
         self.users = {}
         self.fileInfo = {}
         self.activeUsers = {}
+        self.udp_broadcast_port = 50000  # Or any unused port
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def start_peer(self):
         self.peer_socket.bind((self.host, self.port))
@@ -27,6 +31,19 @@ class AuthenticationServer:
         while True:
             client_socket, client_address = self.peer_socket.accept()
             threading.Thread(target=self.handle_client_connection, args=(client_socket, client_address)).start()
+
+    def broadcast_active_user(self, username, address, port):
+        message = {
+            "type": "USER_LOGIN",
+            "username": username,
+            "address": address,
+            "port": port
+        }
+        try:
+            self.udp_socket.sendto(json.dumps(message).encode(), ('<broadcast>', self.udp_broadcast_port))
+            print(f"[UDP BROADCAST] Sent login info for {username}")
+        except Exception as e:
+            print(f"[UDP ERROR] Failed to send broadcast: {e}")
 
     def handle_client_connection(self, client_socket, client_address, file_name="hashed_password.json"):
         activeUsername = None
@@ -83,15 +100,12 @@ class AuthenticationServer:
                                 "address": client_address[0],
                                 "port": port
                             }
+                            self.broadcast_active_user(username, client_address[0], port)
                             activeUsername = username
                         else:
                             client_socket.sendall(b"ERROR: Invalid credentials")
                     else:
                         client_socket.sendall(b"ERROR: Invalid credentials")
-
-                elif command == "UPLOAD":
-                    file_name = response[1]
-                    self.fileInfo[file_name] = activeUsername
 
                 elif command == "AVAILABLE_FILES":
                     client_socket.sendall(json.dumps(self.fileInfo).encode())
